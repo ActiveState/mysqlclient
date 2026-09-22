@@ -1,0 +1,25 @@
+From 79d27b1b2d809dd660751144c20063e3d591f8b2 Mon Sep 17 00:00:00 2001
+From: i-shenl <i-shenl@activestate.com>
+Date: Mon, 16 Oct 2023 18:38:37 -0700
+Subject: [PATCH] use MARIA_SH env var
+
+---
+ setup_posix.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/setup_posix.py b/setup_posix.py
+index c65c045..0c0f7e1 100644
+--- a/setup_posix.py
++++ b/setup_posix.py
+@@ -37,6 +37,8 @@ def get_config():
+ 
+     if 'mysql_config' in options:
+         _mysql_config_path = options['mysql_config']
++    elif "MARIA_SH" in os.environ:
++        _mysql_config_path = os.getenv("MARIA_SH")
+     else:
+         try:
+             mysql_config('version')
+-- 
+2.34.1
+
