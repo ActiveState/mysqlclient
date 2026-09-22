@@ -1,0 +1,181 @@
+From 0de598109793d7cb41965436937192920fdf0c31 Mon Sep 17 00:00:00 2001
+From: icanhasmath <marcg@activestate.com>
+Date: Wed, 17 Jun 2026 11:33:46 -0500
+Subject: [PATCH] Add relocatable plugin_dir option for bundled auth plugins
+
+The bundled MariaDB Connector/C is built with an absolute default plugin
+directory (e.g. /usr/lib/plugin) that does not survive relocation of the
+runtime, so client auth plugins such as caching_sha2_password.so cannot be
+loaded for MySQL 8 authentication, failing with:
+
+    OperationalError (1045, 'Plugin caching_sha2_password could not be
+    loaded: /usr/lib/plugin/caching_sha2_password.so: cannot open shared
+    object file: No such file or directory')
+
+Add a plugin_dir connection option mapped to mysql_options(MYSQL_PLUGIN_DIR),
+and default it to the plugin directory bundled with the runtime, located
+relative to the installed package, so plugins are found wherever the runtime
+is installed. Passing plugin_dir explicitly still overrides the default.
+---
+ HISTORY.rst            | 18 ++++++++++++++++++
+ MySQLdb/_mysql.c       | 16 +++++++++++++---
+ MySQLdb/connections.py | 36 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 67 insertions(+), 3 deletions(-)
+
+diff --git a/HISTORY.rst b/HISTORY.rst
+index 8c5399a..aef6e2b 100644
+--- a/HISTORY.rst
++++ b/HISTORY.rst
+@@ -1,3 +1,21 @@
++============================
++ What's new in 1.4.6.post1
++============================
++
++Release: 2026-06-17
++
++ActiveState build.
++
++* Added a ``plugin_dir`` connection option, mapped to
++  ``mysql_options(mysql, MYSQL_PLUGIN_DIR, ...)``.
++* When ``plugin_dir`` is not given, it now defaults to the client
++  authentication plugin directory bundled with the runtime, located relative
++  to the installed package. This fixes ``OperationalError (1045, 'Plugin
++  caching_sha2_password could not be loaded: .../plugin/caching_sha2_password.so:
++  cannot open shared object file')`` seen with MySQL 8 authentication when the
++  bundled MariaDB Connector/C has a non-relocatable absolute plugin directory
++  compiled in. Passing ``plugin_dir`` explicitly still overrides the default.
++
+ ======================
+  What's new in 1.4.6
+ ======================
+diff --git a/MySQLdb/_mysql.c b/MySQLdb/_mysql.c
+index 64647bf..8361b0c 100644
+--- a/MySQLdb/_mysql.c
++++ b/MySQLdb/_mysql.c
+@@ -402,6 +402,7 @@ _mysql_ConnectionObject_Initialize(
+                   "local_infile",
+                   "read_timeout", "write_timeout", "charset",
+                   "auth_plugin",
++                  "plugin_dir",
+                   NULL } ;
+     int connect_timeout = 0;
+     int read_timeout = 0;
+@@ -411,13 +412,14 @@ _mysql_ConnectionObject_Initialize(
+          *read_default_file=NULL,
+          *read_default_group=NULL,
+          *charset=NULL,
+-         *auth_plugin=NULL;
++         *auth_plugin=NULL,
++         *plugin_dir=NULL;
+ 
+     self->converter = NULL;
+     self->open = 0;
+ 
+     if (!PyArg_ParseTupleAndKeywords(args, kwargs,
+-                "|ssssisOiiisssiOiiiss:connect",
++                "|ssssisOiiisssiOiiisss:connect",
+                 kwlist,
+                 &host, &user, &passwd, &db,
+                 &port, &unix_socket, &conv,
+@@ -430,7 +432,8 @@ _mysql_ConnectionObject_Initialize(
+                 &read_timeout,
+                 &write_timeout,
+                 &charset,
+-                &auth_plugin
++                &auth_plugin,
++                &plugin_dir
+     ))
+         return -1;
+ 
+@@ -500,6 +503,9 @@ _mysql_ConnectionObject_Initialize(
+     if (auth_plugin) {
+         mysql_options(&(self->connection), MYSQL_DEFAULT_AUTH, auth_plugin);
+     }
++    if (plugin_dir) {
++        mysql_options(&(self->connection), MYSQL_PLUGIN_DIR, plugin_dir);
++    }
+ 
+     conn = mysql_real_connect(&(self->connection), host, user, passwd, db,
+                   port, unix_socket, client_flag);
+@@ -584,6 +590,10 @@ read_default_file\n\
+ read_default_group\n\
+   see the MySQL documentation for mysql_options()\n\
+ \n\
++plugin_dir\n\
++  directory to search for client authentication plugins;\n\
++  see MYSQL_PLUGIN_DIR in the MySQL documentation for mysql_options()\n\
++\n\
+ client_flag\n\
+   client flags from MySQLdb.constants.CLIENT\n\
+ \n\
+diff --git a/MySQLdb/connections.py b/MySQLdb/connections.py
+index 4c33ec5..8bd70ba 100644
+--- a/MySQLdb/connections.py
++++ b/MySQLdb/connections.py
+@@ -4,6 +4,7 @@ only one class: Connection. Others are unlikely. However, you might
+ want to make your own subclasses. In most cases, you will probably
+ override Connection.default_cursor with a non-standard Cursor class.
+ """
++import os
+ import re
+ import sys
+ 
+@@ -15,6 +16,25 @@ from MySQLdb._exceptions import (
+     NotSupportedError, ProgrammingError,
+ )
+ 
++
++def _default_plugin_dir():
++    """Locate the bundled client auth plugins relative to this package.
++
++    The bundled MariaDB Connector/C is built with an absolute default plugin
++    directory (e.g. /usr/lib/plugin) that does not survive relocation of the
++    runtime, so auth plugins such as caching_sha2_password.so are not found
++    when the runtime is installed elsewhere. The plugins ship alongside this
++    package -- this module lives at
++    <root>/usr/lib/python2.7/site-packages/MySQLdb while the plugins are at
++    <root>/usr/lib/plugin -- so derive the directory from our own location.
++    Returns None if no such directory exists (e.g. a non-relocated build).
++    """
++    here = os.path.dirname(os.path.abspath(__file__))
++    candidate = os.path.normpath(os.path.join(here, '..', '..', '..', 'plugin'))
++    if os.path.isdir(candidate):
++        return candidate
++    return None
++
+ # Mapping from MySQL charset name to Python codec name
+ _charset_to_encoding = {
+     "utf8mb4": "utf8",
+@@ -76,6 +96,13 @@ class Connection(_mysql.connection):
+         :param str read_default_group:
+             configuration group to use from the default file
+ 
++        :param str plugin_dir:
++            directory to search for client authentication plugins.
++            If not supplied, defaults to the plugin directory bundled with
++            this runtime when one can be located relative to the package;
++            this allows plugins such as caching_sha2_password.so to be found
++            regardless of where the runtime is installed.
++
+         :param type cursorclass:
+             class object, used to create cursors (keyword only)
+ 
+@@ -173,6 +200,15 @@ class Connection(_mysql.connection):
+ 
+         kwargs2['client_flag'] = client_flag
+ 
++        # If the caller did not specify a plugin directory, point the client
++        # library at the auth plugins bundled with this (relocatable) runtime
++        # so plugins such as caching_sha2_password.so are found regardless of
++        # where the runtime is installed.
++        if 'plugin_dir' not in kwargs2:
++            plugin_dir = _default_plugin_dir()
++            if plugin_dir is not None:
++                kwargs2['plugin_dir'] = plugin_dir
++
+         # PEP-249 requires autocommit to be initially off
+         autocommit = kwargs2.pop('autocommit', False)
+ 
+-- 
+2.43.0
+
